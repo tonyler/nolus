@@ -1,5 +1,7 @@
 # Environment and secrets
 .env
+.env.*
+.envrc
 credentials.json
 x_cookies.json
 *.pem
@@ -7,6 +9,7 @@ x_cookies.json
 
 # Python
 venv/
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -16,6 +19,14 @@ build/
 dist/
 *.egg-info/
 .eggs/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.cache/
 
 # Database
 *.db

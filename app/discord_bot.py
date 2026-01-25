@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Optional, Tuple, List, Dict
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 # Add app directory to path for imports
@@ -208,20 +209,13 @@ class NolusBot(commands.Bot):
                 log_level = logging.INFO if success else logging.WARNING
                 logger.log(log_level, f"Processed URL: {url} - {'Success' if success else 'Failed'}: {msg}")
 
-            # Build response message
-            response_lines = []
-            for url, success, msg in results:
-                if success:
-                    response_lines.append(f"Saved {platform} post: {msg}")
-                else:
-                    response_lines.append(f"Failed to add post: {msg}")
-
-            response = '\n'.join(response_lines)
-            try:
-                # Send notification with @everyone
-                await message.channel.send(f"@everyone\n\n{response}")
-            except discord.DiscordException as e:
-                logger.error(f"Failed to send response: {e}")
+            # Only ping @everyone if at least one URL was successfully added
+            has_success = any(success for _, success, _ in results)
+            if has_success:
+                try:
+                    await message.channel.send("@everyone")
+                except discord.DiscordException as e:
+                    logger.error(f"Failed to send notification: {e}")
 
         except Exception as e:
             logger.error(f"Unexpected error in on_message: {e}", exc_info=True)
@@ -291,6 +285,146 @@ class NolusBot(commands.Bot):
     async def before_scrape_task(self):
         """Wait for bot to be ready before starting scrape task."""
         await self.wait_until_ready()
+
+    async def setup_hook(self):
+        """Setup commands when bot starts."""
+        # Prefix command (!scrape)
+        @self.command(name='scrape')
+        @commands.has_permissions(administrator=True)
+        async def scrape_command(ctx):
+            """Admin command to trigger manual scrape without affecting 4-hour schedule."""
+            await ctx.send("Starting manual scrape...")
+            self.loop.create_task(self._run_scrape(ctx.channel))
+
+        @scrape_command.error
+        async def scrape_error(ctx, error):
+            if isinstance(error, commands.MissingPermissions):
+                await ctx.send("You need administrator permissions to use this command.")
+
+        # Slash command (/scrape)
+        @self.tree.command(name='scrape', description='Manually trigger post scraping (admin only)')
+        @app_commands.checks.has_permissions(administrator=True)
+        async def scrape_slash(interaction: discord.Interaction):
+            """Slash command to trigger manual scrape without affecting 4-hour schedule."""
+            await interaction.response.send_message("Starting manual scrape...", ephemeral=True)
+            self.loop.create_task(self._run_scrape_with_followup(interaction))
+
+        @scrape_slash.error
+        async def scrape_slash_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            if isinstance(error, app_commands.MissingPermissions):
+                await interaction.response.send_message(
+                    "You need administrator permissions to use this command.",
+                    ephemeral=True
+                )
+
+        # Sync slash commands with Discord
+        await self.tree.sync()
+        logger.info("Slash commands synced")
+
+    async def _run_scrape(self, channel):
+        """Run scrape and report results to channel. Always executes regardless of lock."""
+        logger.info("Manual scrape triggered by admin")
+
+        try:
+            from x_scraper import XScraper
+
+            posts = self.ambassador_service.get_current_month_x_posts()
+            if not posts:
+                await channel.send("No posts to scrape.")
+                return
+
+            await channel.send(f"Scraping {len(posts)} posts...")
+
+            scraper = XScraper(cookie_file=config.x_scraper_cookie_file)
+
+            try:
+                success_count = 0
+                fail_count = 0
+
+                for post in posts:
+                    tweet_url = post.get('Tweet_URL', '')
+                    if not tweet_url:
+                        continue
+
+                    try:
+                        metrics, msg = scraper.scrape_tweet_metrics(tweet_url, timeout=15)
+                        if metrics:
+                            self.ambassador_service.update_x_post_metrics(tweet_url, metrics)
+                            success_count += 1
+                            logger.info(f"Scraped: {tweet_url}")
+                        else:
+                            fail_count += 1
+                            logger.warning(f"Failed to scrape {tweet_url}: {msg}")
+                    except Exception as e:
+                        fail_count += 1
+                        logger.error(f"Error scraping {tweet_url}: {e}")
+
+                    import asyncio
+                    await asyncio.sleep(5)
+
+                await channel.send(f"Scrape complete: {success_count} success, {fail_count} failed")
+                logger.info(f"Manual scrape complete: {success_count} success, {fail_count} failed")
+
+            finally:
+                scraper.close_driver()
+
+        except Exception as e:
+            logger.error(f"Error in manual scrape: {e}", exc_info=True)
+            await channel.send(f"Scrape error: {str(e)}")
+
+    async def _run_scrape_with_followup(self, interaction: discord.Interaction):
+        """Run scrape and report results via interaction followup. For slash commands."""
+        logger.info("Manual scrape triggered by admin (slash command)")
+
+        try:
+            from x_scraper import XScraper
+
+            posts = self.ambassador_service.get_current_month_x_posts()
+            if not posts:
+                await interaction.followup.send("No posts to scrape.", ephemeral=True)
+                return
+
+            await interaction.followup.send(f"Scraping {len(posts)} posts...", ephemeral=True)
+
+            scraper = XScraper(cookie_file=config.x_scraper_cookie_file)
+
+            try:
+                success_count = 0
+                fail_count = 0
+
+                for post in posts:
+                    tweet_url = post.get('Tweet_URL', '')
+                    if not tweet_url:
+                        continue
+
+                    try:
+                        metrics, msg = scraper.scrape_tweet_metrics(tweet_url, timeout=15)
+                        if metrics:
+                            self.ambassador_service.update_x_post_metrics(tweet_url, metrics)
+                            success_count += 1
+                            logger.info(f"Scraped: {tweet_url}")
+                        else:
+                            fail_count += 1
+                            logger.warning(f"Failed to scrape {tweet_url}: {msg}")
+                    except Exception as e:
+                        fail_count += 1
+                        logger.error(f"Error scraping {tweet_url}: {e}")
+
+                    import asyncio
+                    await asyncio.sleep(5)
+
+                await interaction.followup.send(f"Scrape complete: {success_count} success, {fail_count} failed", ephemeral=True)
+                logger.info(f"Manual scrape complete: {success_count} success, {fail_count} failed")
+
+            finally:
+                scraper.close_driver()
+
+        except Exception as e:
+            logger.error(f"Error in manual scrape: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(f"Scrape error: {str(e)}", ephemeral=True)
+            except Exception:
+                pass  # Followup may have expired
 
 
 def run_bot():

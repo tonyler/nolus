@@ -12,6 +12,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from sheets_service import SheetsService
 from config_loader import get_config
+from pfp_service import get_pfp_service
 
 load_dotenv()
 
@@ -57,6 +58,12 @@ app.secret_key = secret_key
 config = get_config()
 sheets_service = SheetsService()
 
+# Initialize profile picture service (uses db_service from sheets_service if available)
+db_service = getattr(sheets_service, 'db_service', None) or getattr(sheets_service, 'local_service', None)
+if db_service and hasattr(db_service, 'db_service'):
+    db_service = db_service.db_service
+pfp_service = get_pfp_service(db_service)
+
 logger.info("Flask application initialized")
 
 def get_selected_month():
@@ -65,6 +72,10 @@ def get_selected_month():
     if request.args.get('year') and request.args.get('month'):
         return request.args.get('year', type=int), request.args.get('month', type=int)
     return current.year, current.month
+
+def render_error_page(error_message, status_code=500):
+    """Render a user-friendly error page without redirect loops."""
+    return render_template('error.html', error_message=error_message), status_code
 
 @app.route('/')
 def index():
@@ -80,9 +91,13 @@ def x_leaderboard():
 
         leaderboard, total_impressions_all = sheets_service.get_x_leaderboard(selected_year, selected_month)
 
+        # Get profile pictures for all ambassadors
+        pfp_urls = pfp_service.get_pfp_urls_batch(leaderboard)
+
         return render_template(
             'x_leaderboard.html',
             leaderboard=leaderboard,
+            pfp_urls=pfp_urls,
             total_impressions=total_impressions_all,
             total_posts=sum(amb['tweets'] for amb in leaderboard),
             active_ambassadors=len(leaderboard),
@@ -95,8 +110,7 @@ def x_leaderboard():
         )
     except Exception as e:
         logger.error(f"Error rendering X leaderboard: {e}", exc_info=True)
-        flash(f"Error loading leaderboard: {str(e)}", 'error')
-        return redirect(url_for('index'))
+        return render_error_page(f"Error loading X leaderboard: {str(e)}")
 
 @app.route('/reddit-leaderboard')
 def reddit_leaderboard():
@@ -107,9 +121,13 @@ def reddit_leaderboard():
 
         leaderboard = sheets_service.get_reddit_leaderboard(selected_year, selected_month)
 
+        # Get profile pictures for all ambassadors
+        pfp_urls = pfp_service.get_pfp_urls_batch(leaderboard)
+
         return render_template(
             'reddit_leaderboard.html',
             leaderboard=leaderboard,
+            pfp_urls=pfp_urls,
             total_score=sum(amb['total_score'] for amb in leaderboard),
             total_posts=sum(amb['posts'] for amb in leaderboard),
             total_comments=sum(amb['total_comments'] for amb in leaderboard),
@@ -123,8 +141,7 @@ def reddit_leaderboard():
         )
     except Exception as e:
         logger.error(f"Error rendering Reddit leaderboard: {e}", exc_info=True)
-        flash(f"Error loading leaderboard: {str(e)}", 'error')
-        return redirect(url_for('index'))
+        return render_error_page(f"Error loading Reddit leaderboard: {str(e)}")
 
 @app.route('/total-leaderboard')
 def total_leaderboard():
@@ -135,9 +152,13 @@ def total_leaderboard():
 
         leaderboard = sheets_service.get_total_leaderboard(selected_year, selected_month)
 
+        # Get profile pictures for all ambassadors
+        pfp_urls = pfp_service.get_pfp_urls_batch(leaderboard)
+
         return render_template(
             'total_leaderboard.html',
             leaderboard=leaderboard,
+            pfp_urls=pfp_urls,
             total_x_views=sum(amb['x_views'] for amb in leaderboard),
             total_reddit_views=sum(amb['reddit_views'] for amb in leaderboard),
             total_combined_views=sum(amb['total_views'] for amb in leaderboard),
@@ -150,8 +171,7 @@ def total_leaderboard():
         )
     except Exception as e:
         logger.error(f"Error rendering total leaderboard: {e}", exc_info=True)
-        flash(f"Error loading leaderboard: {str(e)}", 'error')
-        return redirect(url_for('index'))
+        return render_error_page(f"Error loading total leaderboard: {str(e)}")
 
 @app.route('/api/refresh-reddit', methods=['POST'])
 def refresh_reddit():
@@ -183,6 +203,37 @@ def clear_cache():
         return jsonify({'success': True, 'message': 'Cache cleared successfully'})
     except Exception as e:
         logger.error(f"Error clearing cache: {e}", exc_info=True)
+        return jsonify({'success': False, 'message': f"Error: {str(e)}"})
+
+@app.route('/api/update-ambassador', methods=['POST'])
+def update_ambassador():
+    """API endpoint to update ambassador X handle"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'message': 'No data provided'})
+
+        name = data.get('name')
+        x_handle = data.get('x_handle')
+
+        if not name or not x_handle:
+            return jsonify({'success': False, 'message': 'Name and x_handle are required'})
+
+        # Update the ambassador's handle and fetch new profile picture
+        success = pfp_service.update_ambassador_handle(name, x_handle)
+
+        if success:
+            pfp_url = pfp_service.get_pfp_url(name, x_handle)
+            return jsonify({
+                'success': True,
+                'message': f'Updated {name} with handle @{x_handle}',
+                'pfp_url': pfp_url
+            })
+        else:
+            return jsonify({'success': False, 'message': 'Failed to update ambassador'})
+
+    except Exception as e:
+        logger.error(f"Error updating ambassador: {e}", exc_info=True)
         return jsonify({'success': False, 'message': f"Error: {str(e)}"})
 
 @app.template_filter('month_name')

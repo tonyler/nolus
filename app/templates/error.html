@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Error{% endblock %}
+
+{% block content %}
+<header class="page-header">
+    <h1 class="page-title">Something went wrong</h1>
+    <p class="page-subtitle">{{ error_message }}</p>
+</header>
+
+<div class="empty-state">
+    <div class="empty-state-title">Try another view</div>
+    <div class="actions">
+        <a class="btn btn-primary" href="{{ url_for('x_leaderboard') }}">X Leaderboard</a>
+        <a class="btn" href="{{ url_for('reddit_leaderboard') }}">Reddit</a>
+        <a class="btn" href="{{ url_for('total_leaderboard') }}">Total</a>
+    </div>
+</div>
+{% endblock %}

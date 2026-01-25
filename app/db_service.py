@@ -133,6 +133,17 @@ class DatabaseService:
                     ON snapshots(month, year)
                 ''')
 
+                # Ambassadors table for profile data
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ambassadors (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        x_handle TEXT,
+                        pfp_url TEXT,
+                        last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
                 conn.commit()
                 logger.info("Database schema initialized successfully")
 
@@ -459,6 +470,83 @@ class DatabaseService:
                 return False
             finally:
                 conn.close()
+
+    # Ambassador Methods
+
+    def upsert_ambassador(self, name: str, x_handle: Optional[str] = None, pfp_url: Optional[str] = None) -> bool:
+        """Insert or update an ambassador's profile data.
+
+        Args:
+            name: Ambassador name
+            x_handle: X/Twitter handle (without @)
+            pfp_url: Profile picture URL
+
+        Returns:
+            True if successful
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO ambassadors (name, x_handle, pfp_url)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        x_handle = COALESCE(excluded.x_handle, ambassadors.x_handle),
+                        pfp_url = COALESCE(excluded.pfp_url, ambassadors.pfp_url),
+                        last_updated = CURRENT_TIMESTAMP
+                ''', (name, x_handle, pfp_url))
+                conn.commit()
+                logger.info(f"Upserted ambassador: {name}")
+                return True
+            except Exception as e:
+                logger.error(f"Error upserting ambassador: {e}")
+                conn.rollback()
+                return False
+            finally:
+                conn.close()
+
+    def get_ambassador(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get ambassador profile data by name.
+
+        Args:
+            name: Ambassador name
+
+        Returns:
+            Ambassador dictionary or None
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM ambassadors WHERE name = ?', (name,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_all_ambassadors(self) -> List[Dict[str, Any]]:
+        """Get all ambassadors with their profile data.
+
+        Returns:
+            List of ambassador dictionaries
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM ambassadors ORDER BY name')
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_ambassadors_map(self) -> Dict[str, Dict[str, Any]]:
+        """Get a map of ambassador names to their profile data.
+
+        Returns:
+            Dictionary mapping name -> {x_handle, pfp_url}
+        """
+        ambassadors = self.get_all_ambassadors()
+        return {amb['name']: amb for amb in ambassadors}
 
     def get_database_stats(self) -> Dict[str, Any]:
         """Get statistics about database contents.
