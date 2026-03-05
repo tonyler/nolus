@@ -747,6 +747,38 @@ main.container {
 .legend-dot.cyan { background: var(--cyan); }
 .legend-dot.gold { background: var(--gold); }
 .legend-dot.purple { background: var(--purple); }
+.legend-dot.green { background: #10b981; }
+
+.chart-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.btn-export {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+
+.btn-export:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--border);
+}
+
+.btn-export svg {
+    opacity: 0.7;
+}
 
 .chart-container {
     position: relative;

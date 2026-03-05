@@ -182,6 +182,34 @@
     </div>
     {% endif %}
 </div>
+
+<!-- Daily Views Chart -->
+{% if daily_views %}
+<div class="chart-panel">
+    <div class="chart-header">
+        <h3 class="chart-title">Daily Views</h3>
+        <div class="chart-actions">
+            <a href="{{ url_for('export_daily_snapshots_csv', year=selected_year, month=selected_month) }}" class="btn-export">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Export CSV
+            </a>
+        </div>
+    </div>
+    <div class="chart-legend">
+        <div class="legend-item">
+            <span class="legend-dot green"></span>
+            <span>Views per Day</span>
+        </div>
+    </div>
+    <div class="chart-container">
+        <canvas id="dailyViewsChart"></canvas>
+    </div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -194,12 +222,13 @@
         document.getElementById('xMonthForm').submit();
     });
 
-    {% if daily_stats %}
     // Chart configuration
     Chart.defaults.color = '#8899aa';
     Chart.defaults.borderColor = 'rgba(255, 255, 255, 0.06)';
     Chart.defaults.font.family = "'DM Sans', sans-serif";
 
+    {% if daily_stats %}
+    // Cumulative Impressions Chart
     const ctx = document.getElementById('xProgressChart').getContext('2d');
 
     // Create gradient
@@ -248,6 +277,84 @@
                     callbacks: {
                         label: function(context) {
                             return context.parsed.y.toLocaleString() + ' impressions';
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    grid: {
+                        display: false
+                    },
+                    ticks: {
+                        maxRotation: 0,
+                        autoSkip: true,
+                        maxTicksLimit: 10
+                    }
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: 'rgba(255, 255, 255, 0.04)'
+                    },
+                    ticks: {
+                        callback: function(value) {
+                            if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
+                            if (value >= 1000) return (value / 1000).toFixed(0) + 'K';
+                            return value.toLocaleString();
+                        }
+                    }
+                }
+            }
+        }
+    });
+    {% endif %}
+
+    {% if daily_views %}
+    // Daily Views Bar Chart
+    const dailyCtx = document.getElementById('dailyViewsChart').getContext('2d');
+
+    // Create gradient for bars
+    const barGradient = dailyCtx.createLinearGradient(0, 0, 0, 280);
+    barGradient.addColorStop(0, 'rgba(16, 185, 129, 0.8)');
+    barGradient.addColorStop(1, 'rgba(16, 185, 129, 0.2)');
+
+    new Chart(dailyCtx, {
+        type: 'bar',
+        data: {
+            labels: {{ daily_views.dates | tojson }},
+            datasets: [{
+                label: 'Daily Views',
+                data: {{ daily_views.daily_views | tojson }},
+                backgroundColor: barGradient,
+                borderColor: '#10b981',
+                borderWidth: 1,
+                borderRadius: 4,
+                hoverBackgroundColor: '#10b981'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 22, 32, 0.95)',
+                    borderColor: 'rgba(16, 185, 129, 0.25)',
+                    borderWidth: 1,
+                    titleFont: { family: "'Chakra Petch', sans-serif", weight: '600' },
+                    bodyFont: { family: "'DM Sans', sans-serif" },
+                    padding: 12,
+                    cornerRadius: 8,
+                    callbacks: {
+                        label: function(context) {
+                            return '+' + context.parsed.y.toLocaleString() + ' views';
                         }
                     }
                 }

@@ -1,100 +1,213 @@
 """
-Reddit Scraper - Extracts engagement metrics from Reddit posts using web scraping (no API required)
+Reddit Scraper - Extracts engagement metrics from Reddit posts using Playwright.
+Uses old.reddit.com for simple HTML structure.
+Handles /s/ share links via browser redirect.
 """
 
 import re
 import time
 import logging
-import requests
 from datetime import datetime
 from typing import Tuple, Optional, Dict, List
-from bs4 import BeautifulSoup
+
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from playwright_stealth import Stealth
 
 logger = logging.getLogger(__name__)
 
 
 class RedditScraper:
-    """Scrapes engagement metrics from Reddit posts using requests + BeautifulSoup"""
+    """Scrapes engagement metrics from Reddit posts using Playwright stealth."""
 
     def __init__(self):
-        """Initialize the scraper with session"""
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        })
-        logger.info("Reddit scraper initialized successfully")
+        self._stealth = Stealth()
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(headless=True)
+        self._context = self._browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            viewport={'width': 1280, 'height': 720},
+            locale='en-US',
+            timezone_id='America/New_York',
+        )
+        self._stealth.apply_stealth_sync(self._context)
+        logger.info("Reddit scraper initialized (Playwright stealth)")
 
     def close_driver(self):
-        """Close the session (for compatibility with old code)"""
-        self.session.close()
-        logger.info("Reddit scraper session closed")
-
-    def _parse_count(self, count_str: str) -> int:
-        """
-        Parse engagement count from string format (e.g., '1.2k', '5m', '847')
-
-        Args:
-            count_str: String representation of count
-
-        Returns:
-            Integer count value
-        """
-        if not count_str:
-            return 0
-
-        count_str = count_str.strip().replace(',', '').lower()
-
-        # Handle k (thousands) and m (millions)
-        multiplier = 1
-        if count_str.endswith('k'):
-            multiplier = 1000
-            count_str = count_str[:-1]
-        elif count_str.endswith('m'):
-            multiplier = 1000000
-            count_str = count_str[:-1]
-        elif count_str.endswith('b'):
-            multiplier = 1000000000
-            count_str = count_str[:-1]
-
         try:
-            return int(float(count_str) * multiplier)
-        except (ValueError, TypeError):
-            return 0
+            self._context.close()
+            self._browser.close()
+            self._pw.stop()
+        except Exception:
+            pass
 
-    def _extract_metrics_from_json(self, soup: BeautifulSoup) -> Dict:
-        """
-        Extract metrics from JSON data embedded in the page
+    def _to_old_reddit(self, url: str) -> str:
+        """Convert URL to old.reddit.com."""
+        return re.sub(r'https?://(?:www\.)?reddit\.com', 'https://old.reddit.com', url)
 
-        Args:
-            soup: BeautifulSoup object of the page
+    def _scrape_old_reddit(self, page) -> Optional[Dict]:
+        """Extract metrics from an old.reddit.com post page."""
+        metrics = {'score': 0, 'comments': 0, 'views': 0, 'date_posted': None, 'author': ''}
 
-        Returns:
-            Dictionary with metrics
-        """
-        metrics = {
-            'score': 0,
-            'comments': 0,
-            'views': 0,
-            'date_posted': None
-        }
+        # data-score on .thing div
+        thing = page.query_selector('div.thing')
+        if thing:
+            score = thing.get_attribute('data-score')
+            if score:
+                try:
+                    metrics['score'] = int(float(score))
+                except ValueError:
+                    pass
 
-        try:
-            # Old Reddit: Look for data attributes in the main post div
-            thing = soup.find('div', class_='thing')
-            if thing:
-                # Get score from data-score attribute
-                score_attr = thing.get('data-score')
-                if score_attr and score_attr != 'â¢':
+            comments = thing.get_attribute('data-comments-count')
+            if comments:
+                try:
+                    metrics['comments'] = int(float(comments))
+                except ValueError:
+                    pass
+
+            author = thing.get_attribute('data-author')
+            if author:
+                metrics['author'] = author
+
+        # Fallback score from .score element
+        if not metrics['score']:
+            score_el = page.query_selector('.score.unvoted')
+            if score_el:
+                title = score_el.get_attribute('title')
+                if title:
                     try:
-                        metrics['score'] = int(float(score_attr))
-                        logger.debug(f"Extracted score from data-score: {metrics['score']}")
+                        metrics['score'] = int(title)
                     except ValueError:
                         pass
 
-                # Get comments from data-comments-count attribute
+        # Fallback comments from link text
+        if not metrics['comments']:
+            comments_link = page.query_selector('a.comments')
+            if comments_link:
+                text = comments_link.inner_text()
+                match = re.search(r'(\d+)', text)
+                if match:
+                    metrics['comments'] = int(match.group(1))
+
+        # Date
+        time_el = page.query_selector('time.live-timestamp')
+        if time_el:
+            dt = time_el.get_attribute('datetime')
+            if dt:
+                metrics['date_posted'] = dt
+
+        return metrics if (metrics['score'] or metrics['comments']) else None
+
+    def _scrape_new_reddit(self, page) -> Optional[Dict]:
+        """Fallback: extract metrics from new reddit page."""
+        metrics = {'score': 0, 'comments': 0, 'views': 0, 'date_posted': None, 'author': ''}
+
+        # Score from upvote button or shreddit-post
+        score_el = page.query_selector('shreddit-post')
+        if score_el:
+            score = score_el.get_attribute('score')
+            if score:
+                try:
+                    metrics['score'] = int(score)
+                except ValueError:
+                    pass
+            comment_count = score_el.get_attribute('comment-count')
+            if comment_count:
+                try:
+                    metrics['comments'] = int(comment_count)
+                except ValueError:
+                    pass
+            author = score_el.get_attribute('author')
+            if author:
+                metrics['author'] = author
+            created = score_el.get_attribute('created-timestamp')
+            if created:
+                metrics['date_posted'] = created
+
+        return metrics if (metrics['score'] or metrics['comments']) else None
+
+    def scrape_post_metrics(self, url: str, timeout: int = 20) -> Tuple[Optional[Dict], str]:
+        """Scrape engagement metrics from a single Reddit post.
+
+        Args:
+            url: Full URL to the Reddit post
+            timeout: Page load timeout in seconds
+
+        Returns:
+            Tuple of (metrics_dict, message)
+        """
+        page = self._context.new_page()
+        try:
+            logger.info(f"Scraping Reddit post: {url}")
+
+            is_share_link = '/s/' in url
+
+            if is_share_link:
+                # Let the browser follow the JS redirect
+                page.goto(url, wait_until='domcontentloaded', timeout=timeout * 1000)
+                page.wait_for_timeout(3000)
+                final_url = page.url
+                logger.info(f"Share link resolved to: {final_url}")
+
+                if '/s/' in final_url:
+                    return None, f"Share link did not redirect: {url}"
+
+                # Now load via old.reddit for easy parsing
+                old_url = self._to_old_reddit(final_url)
+                page.goto(old_url, wait_until='domcontentloaded', timeout=timeout * 1000)
+                page.wait_for_timeout(2000)
+            else:
+                old_url = self._to_old_reddit(url)
+                page.goto(old_url, wait_until='domcontentloaded', timeout=timeout * 1000)
+                page.wait_for_timeout(2000)
+
+            # Check if we landed on old reddit or got redirected to new
+            current = page.url
+            if 'old.reddit.com' in current:
+                metrics = self._scrape_old_reddit(page)
+            else:
+                metrics = self._scrape_new_reddit(page)
+
+            if metrics:
+                logger.info(f"Scraped: {metrics}")
+                return metrics, f"Successfully scraped {url}"
+
+            return None, f"Could not extract metrics from {url}"
+
+        except PwTimeout:
+            return None, f"Timeout loading {url}"
+        except Exception as e:
+            error_msg = f"Error scraping {url}: {e}"
+            logger.error(error_msg)
+            return None, error_msg
+        finally:
+            page.close()
+
+    def scrape_multiple_posts(self, urls: List[str], delay: int = 3) -> List[Tuple[str, Optional[Dict], str]]:
+        """Scrape metrics from multiple Reddit posts.
+
+        Args:
+            urls: List of Reddit post URLs
+            delay: Delay in seconds between requests
+
+        Returns:
+            List of tuples: (url, metrics_or_none, message)
+        """
+        results = []
+        for i, url in enumerate(urls):
+            metrics, message = self.scrape_post_metrics(url)
+            results.append((url, metrics, message))
+            if i < len(urls) - 1:
+                time.sleep(delay)
+        return results
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    scraper = RedditScraper()
+    test_url = "https://www.reddit.com/r/cosmosnetwork/s/160WNx2IfK"
+    metrics, msg = scraper.scrape_post_metrics(test_url)
+    print(f"\n{msg}")
+    if metrics:
+        print(f"Metrics: {metrics}")
+    scraper.close_driver()

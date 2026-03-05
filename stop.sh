@@ -40,9 +40,13 @@ stop_process() {
     fi
 }
 
-# Stop both services
+# Stop Flask app
 stop_process "Flask app" "flask"
-stop_process "Discord bot" "bot"
+
+# Stop Discord bot via systemd
+echo "Stopping Discord bot (systemd)..."
+systemctl stop nolus-bot.service
+echo "Discord bot stopped"
 
 echo ""
 echo "All services stopped"

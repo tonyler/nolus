@@ -47,12 +47,18 @@ class ProfilePictureService:
         """Check if a cached entry is still valid."""
         return datetime.now() - timestamp < timedelta(hours=self.CACHE_TTL_HOURS)
 
-    def get_pfp_url(self, name: str, x_handle: Optional[str] = None) -> Optional[str]:
+    def get_pfp_url(
+        self,
+        name: str,
+        x_handle: Optional[str] = None,
+        allow_generated_fallback: bool = True
+    ) -> Optional[str]:
         """Get profile picture URL for an ambassador.
 
         Args:
             name: Ambassador name
             x_handle: X/Twitter handle (optional, will try to use name if not provided)
+            allow_generated_fallback: If False, only return stored DB/cache URLs
 
         Returns:
             Profile picture URL or None
@@ -60,7 +66,8 @@ class ProfilePictureService:
         with self._cache_lock:
             if name in self._memory_cache:
                 url, timestamp = self._memory_cache[name]
-                if self._is_cache_valid(timestamp):
+                is_generated = isinstance(url, str) and url.startswith(self.UNAVATAR_BASE)
+                if self._is_cache_valid(timestamp) and (allow_generated_fallback or not is_generated):
                     return url
 
         if self.db_service:
@@ -71,6 +78,9 @@ class ProfilePictureService:
                 return ambassador['pfp_url']
             if ambassador and ambassador.get('x_handle'):
                 x_handle = ambassador['x_handle']
+
+        if not allow_generated_fallback:
+            return None
 
         handle = x_handle or name
         pfp_url = self._get_unavatar_url(handle)
@@ -83,11 +93,16 @@ class ProfilePictureService:
 
         return pfp_url
 
-    def get_pfp_urls_batch(self, ambassadors: List[Dict]) -> Dict[str, str]:
+    def get_pfp_urls_batch(
+        self,
+        ambassadors: List[Dict],
+        allow_generated_fallback: bool = True
+    ) -> Dict[str, str]:
         """Get profile picture URLs for multiple ambassadors.
 
         Args:
             ambassadors: List of ambassador dictionaries with 'name' key
+            allow_generated_fallback: If False, only return stored DB/cache URLs
 
         Returns:
             Dictionary mapping name -> profile picture URL
@@ -97,7 +112,7 @@ class ProfilePictureService:
             name = amb.get('name', '')
             if name:
                 x_handle = amb.get('x_handle')
-                result[name] = self.get_pfp_url(name, x_handle)
+                result[name] = self.get_pfp_url(name, x_handle, allow_generated_fallback)
         return result
 
     def update_ambassador_handle(self, name: str, x_handle: str) -> bool:

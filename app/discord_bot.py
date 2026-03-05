@@ -78,8 +78,10 @@ except ValueError as e:
 logger.info(f"Discord channels configured - X: {X_CHANNEL_ID}, Reddit: {REDDIT_CHANNEL_ID}")
 
 # URL patterns with length limits for safety
-X_URL_PATTERN = re.compile(r'https?://(?:www\.)?(?:twitter\.com|x\.com)/\w{1,50}/status/\d{10,20}')
-REDDIT_URL_PATTERN = re.compile(r'https?://(?:www\.)?(?:reddit\.com/r/\w{1,50}/comments/\w{5,10}|redd\.it/\w{5,10})(?:[/?#][^\s]*)?')
+X_URL_PATTERN = re.compile(
+    r'https?://(?:www\.)?(?:twitter\.com|x\.com)/(?:\w{1,50}/status/\d{10,20}|i(?:/web)?/status/\d{10,20})'
+)
+REDDIT_URL_PATTERN = re.compile(r'https?://(?:www\.)?(?:reddit\.com/r/\w{1,50}/(?:comments|s)/\w{5,20}|reddit\.com/user/\w{1,50}/comments/\w{5,10}|redd\.it/\w{5,10})(?:[/?#][^\s]*)?')
 
 
 class NolusBot(commands.Bot):
@@ -201,13 +203,40 @@ class NolusBot(commands.Bot):
                 # No relevant URLs found, skip silently
                 return
 
-            # Process each URL - ambassador auto-detected from handle
+            # Use Discord poster identity as fallback (and for Reddit attribution/PFP).
+            submitter_name = message.author.display_name or message.author.name
+            submitter_avatar = str(message.author.display_avatar.url) if message.author.display_avatar else None
+            submitter_discord_id = str(message.author.id)
+            submitter_username = message.author.name
+
+            # Process each URL
             results = []
             for url in urls:
-                success, msg = self.local_service.add_content(url)  # No ambassador param - auto-detect
+                success, msg = self.local_service.add_content(
+                    url,
+                    ambassador=submitter_name,
+                    discord_avatar_url=submitter_avatar,
+                    submitter_discord_id=submitter_discord_id,
+                    submitter_username=submitter_username
+                )
                 results.append((url, success, msg))
                 log_level = logging.INFO if success else logging.WARNING
-                logger.log(log_level, f"Processed URL: {url} - {'Success' if success else 'Failed'}: {msg}")
+                logger.log(
+                    log_level,
+                    f"Processed URL by {submitter_name} ({submitter_discord_id}): {url} - "
+                    f"{'Success' if success else 'Failed'}: {msg}"
+                )
+
+            # Notify user about duplicates
+            duplicates = [url for url, success, msg in results if not success and msg == "duplicate"]
+            if duplicates:
+                try:
+                    await message.reply(
+                        "This post was already submitted.",
+                        delete_after=10
+                    )
+                except discord.DiscordException as e:
+                    logger.error(f"Failed to send duplicate notice: {e}")
 
             # Only ping @everyone if at least one URL was successfully added
             has_success = any(success for _, success, _ in results)

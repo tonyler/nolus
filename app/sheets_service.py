@@ -126,17 +126,33 @@ class SheetsService:
         """
         return self.local_service.get_daily_impressions_for_graph(year, month)
 
-    def add_content(self, content_url: str, ambassador: Optional[str] = None) -> Tuple[bool, str]:
+    def add_content(
+        self,
+        content_url: str,
+        ambassador: Optional[str] = None,
+        discord_avatar_url: Optional[str] = None,
+        submitter_discord_id: Optional[str] = None,
+        submitter_username: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """Add new content submission.
 
         Args:
             content_url: URL of the content (X or Reddit)
             ambassador: Ambassador name (optional - auto-detected from handle)
+            discord_avatar_url: Discord avatar URL for submitter (optional)
+            submitter_discord_id: Discord user ID of submitter (optional)
+            submitter_username: Discord username of submitter (optional)
 
         Returns:
             Tuple of (success, message)
         """
-        return self.local_service.add_content(content_url, ambassador)
+        return self.local_service.add_content(
+            content_url,
+            ambassador,
+            discord_avatar_url,
+            submitter_discord_id,
+            submitter_username
+        )
 
     def update_reddit_stats(self, year: Optional[int] = None, month: Optional[int] = None) -> Tuple[bool, str]:
         """Trigger Reddit stats refresh.
@@ -199,3 +215,35 @@ class SheetsService:
         if result[0]:
             self.local_service.clear_cache()
         return result
+
+    def record_daily_snapshot(self) -> Tuple[bool, str]:
+        """Record a daily snapshot of current totals.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        return self.local_service.record_daily_snapshot()
+
+    def get_daily_views(self, year: int, month: int) -> Optional[Dict[str, List]]:
+        """Get daily views (change per day) from cumulative snapshots.
+
+        Args:
+            year: Year to query
+            month: Month to query
+
+        Returns:
+            Dictionary with 'dates' and 'daily_views' lists, or None if no data
+        """
+        return self.local_service.get_daily_views(year, month)
+
+    def export_daily_snapshots_csv(self, year: int, month: int) -> Optional[str]:
+        """Export daily snapshots to CSV format.
+
+        Args:
+            year: Year to export
+            month: Month to export
+
+        Returns:
+            CSV string or None if no data
+        """
+        return self.local_service.export_daily_snapshots_csv(year, month)

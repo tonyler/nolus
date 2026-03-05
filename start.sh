@@ -43,15 +43,6 @@ if [ -f "$PID_DIR/flask.pid" ]; then
     fi
 fi
 
-if [ -f "$PID_DIR/bot.pid" ]; then
-    BOT_PID=$(cat "$PID_DIR/bot.pid")
-    if ps -p "$BOT_PID" > /dev/null 2>&1; then
-        echo "Discord bot already running (PID: $BOT_PID)"
-    else
-        rm "$PID_DIR/bot.pid"
-    fi
-fi
-
 # Start Flask app with gunicorn
 if [ ! -f "$PID_DIR/flask.pid" ]; then
     echo "Starting Flask app..."
@@ -61,18 +52,14 @@ if [ ! -f "$PID_DIR/flask.pid" ]; then
     echo "Flask app started (PID: $!)"
 fi
 
-# Start Discord bot
-if [ ! -f "$PID_DIR/bot.pid" ]; then
-    echo "Starting Discord bot..."
-    nohup "$PYTHON" run_bot.py \
-        > "$LOG_DIR/bot.log" 2>&1 &
-    echo $! > "$PID_DIR/bot.pid"
-    echo "Discord bot started (PID: $!)"
-fi
+# Start Discord bot via systemd (handles auto-restart/watchdog)
+echo "Starting Discord bot (systemd)..."
+systemctl start nolus-bot.service
+echo "Discord bot started"
 
 echo ""
 echo "Services started. Logs available at:"
 echo "  Flask: $LOG_DIR/flask.log"
-echo "  Bot:   $LOG_DIR/bot.log"
+echo "  Bot:   $LOG_DIR/bot.log  (also: journalctl -u nolus-bot -f)"
 echo ""
 echo "To stop services, run: ./stop.sh"

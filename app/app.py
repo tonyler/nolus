@@ -6,13 +6,15 @@ import os
 import logging
 from datetime import datetime
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, Response, g
 from dotenv import load_dotenv
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from sheets_service import SheetsService
 from config_loader import get_config
 from pfp_service import get_pfp_service
+from auth import auth_bp, require_auth
+from session_service import clean_expired_sessions
 
 load_dotenv()
 
@@ -42,6 +44,8 @@ class ReverseProxied:
 
 
 app = Flask(__name__)
+# Set application root for URL generation behind reverse proxy
+app.config['APPLICATION_ROOT'] = os.getenv('APP_BASE_URL', '/nolus')
 # Add ReverseProxied middleware to handle X-Script-Name header from nginx
 app.wsgi_app = ReverseProxied(app.wsgi_app)
 # Add ProxyFix to handle X-Forwarded-* headers from nginx
@@ -57,6 +61,12 @@ app.secret_key = secret_key
 # Initialize configuration and services
 config = get_config()
 sheets_service = SheetsService()
+
+# Register auth blueprint
+app.register_blueprint(auth_bp)
+
+# Clean expired sessions on startup
+clean_expired_sessions()
 
 # Initialize profile picture service (uses db_service from sheets_service if available)
 db_service = getattr(sheets_service, 'db_service', None) or getattr(sheets_service, 'local_service', None)
@@ -77,12 +87,20 @@ def render_error_page(error_message, status_code=500):
     """Render a user-friendly error page without redirect loops."""
     return render_template('error.html', error_message=error_message), status_code
 
+@app.route('/login')
+def login_page():
+    """Login page"""
+    app_prefix = os.getenv('APP_BASE_URL', '/nolus').rstrip('/')
+    return render_template('login.html', app_prefix=app_prefix)
+
 @app.route('/')
+@require_auth
 def index():
     """Main dashboard - redirect to X leaderboard"""
     return redirect(url_for('x_leaderboard'))
 
 @app.route('/x-leaderboard')
+@require_auth
 def x_leaderboard():
     """X/Twitter leaderboard page"""
     try:
@@ -106,13 +124,15 @@ def x_leaderboard():
             selected_month=selected_month,
             current_year=current_month.year,
             current_month_num=current_month.month,
-            daily_stats=sheets_service.get_x_daily_stats(selected_year, selected_month)
+            daily_stats=sheets_service.get_x_daily_stats(selected_year, selected_month),
+            daily_views=sheets_service.get_daily_views(selected_year, selected_month)
         )
     except Exception as e:
         logger.error(f"Error rendering X leaderboard: {e}", exc_info=True)
         return render_error_page(f"Error loading X leaderboard: {str(e)}")
 
 @app.route('/reddit-leaderboard')
+@require_auth
 def reddit_leaderboard():
     """Reddit leaderboard page"""
     try:
@@ -121,8 +141,9 @@ def reddit_leaderboard():
 
         leaderboard = sheets_service.get_reddit_leaderboard(selected_year, selected_month)
 
-        # Get profile pictures for all ambassadors
-        pfp_urls = pfp_service.get_pfp_urls_batch(leaderboard)
+        # Reddit page should show submitter avatars from stored data,
+        # not generated X avatar guesses from ambassador names.
+        pfp_urls = pfp_service.get_pfp_urls_batch(leaderboard, allow_generated_fallback=False)
 
         return render_template(
             'reddit_leaderboard.html',
@@ -144,6 +165,7 @@ def reddit_leaderboard():
         return render_error_page(f"Error loading Reddit leaderboard: {str(e)}")
 
 @app.route('/total-leaderboard')
+@require_auth
 def total_leaderboard():
     """Total combined leaderboard page"""
     try:
@@ -174,6 +196,7 @@ def total_leaderboard():
         return render_error_page(f"Error loading total leaderboard: {str(e)}")
 
 @app.route('/api/refresh-reddit', methods=['POST'])
+@require_auth
 def refresh_reddit():
     """API endpoint to refresh Reddit stats"""
     try:
@@ -194,6 +217,7 @@ def refresh_reddit():
         return jsonify({'success': False, 'message': f"Error: {str(e)}"})
 
 @app.route('/api/clear-cache', methods=['POST'])
+@require_auth
 def clear_cache():
     """API endpoint to clear all caches"""
     try:
@@ -206,6 +230,7 @@ def clear_cache():
         return jsonify({'success': False, 'message': f"Error: {str(e)}"})
 
 @app.route('/api/update-ambassador', methods=['POST'])
+@require_auth
 def update_ambassador():
     """API endpoint to update ambassador X handle"""
     try:
@@ -235,6 +260,34 @@ def update_ambassador():
     except Exception as e:
         logger.error(f"Error updating ambassador: {e}", exc_info=True)
         return jsonify({'success': False, 'message': f"Error: {str(e)}"})
+
+@app.route('/api/daily-snapshots.csv')
+@require_auth
+def export_daily_snapshots_csv():
+    """Export daily snapshots to CSV"""
+    try:
+        year = request.args.get('year', type=int)
+        month = request.args.get('month', type=int)
+
+        if not year or not month:
+            now = datetime.now()
+            year = year or now.year
+            month = month or now.month
+
+        csv_data = sheets_service.export_daily_snapshots_csv(year, month)
+
+        if not csv_data:
+            return jsonify({'error': 'No data available for the selected period'}), 404
+
+        filename = f"daily_snapshots_{year}_{month:02d}.csv"
+        return Response(
+            csv_data,
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename={filename}'}
+        )
+    except Exception as e:
+        logger.error(f"Error exporting CSV: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 @app.template_filter('month_name')
 def month_name_filter(month_num):

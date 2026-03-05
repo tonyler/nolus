@@ -128,6 +128,17 @@ class LocalDataService:
             total_impressions_all = 0
 
             for post in filtered_posts:
+                # Hide unresolved placeholder rows created from x.com/i/status links
+                # that never scraped successfully.
+                if (post.get('ambassador', '').strip().lower() == 'unknown'
+                        and safe_int(post.get('impressions')) == 0
+                        and safe_int(post.get('likes')) == 0
+                        and safe_int(post.get('replies')) == 0
+                        and safe_int(post.get('retweets')) == 0
+                        and re.search(r'(?:twitter\.com|x\.com)/i(?:/web)?/status/\d+',
+                                      post.get('tweet_url', ''))):
+                    continue
+
                 name = post['ambassador']
                 if name not in ambassador_stats:
                     ambassador_stats[name] = {
@@ -216,7 +227,14 @@ class LocalDataService:
             ambassador_stats: Dict[str, Dict] = {}
 
             for post in filtered_posts:
-                name = post['ambassador']
+                name = post.get('ambassador', '')
+                if not name or name.strip().lower() == 'unknown':
+                    name = (
+                        post.get('submitter_display_name')
+                        or post.get('submitter_username')
+                        or name
+                    )
+                name = name or 'Unknown'
                 if name not in ambassador_stats:
                     ambassador_stats[name] = {
                         'name': name,
@@ -580,12 +598,22 @@ class LocalDataService:
             logger.error(f"Error getting daily impressions for graph: {e}", exc_info=True)
             return None
 
-    def add_content(self, content_url: str, ambassador: Optional[str] = None) -> Tuple[bool, str]:
+    def add_content(
+        self,
+        content_url: str,
+        ambassador: Optional[str] = None,
+        discord_avatar_url: Optional[str] = None,
+        submitter_discord_id: Optional[str] = None,
+        submitter_username: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """Add new content submission.
 
         Args:
             content_url: URL of the content (X or Reddit)
-            ambassador: Ambassador name (optional - will be auto-detected from handle if not provided)
+            ambassador: Ambassador name (optional - usually Discord submitter display name)
+            discord_avatar_url: Discord avatar URL for the submitter (optional)
+            submitter_discord_id: Discord user ID of submitter (optional)
+            submitter_username: Discord username of submitter (optional)
 
         Returns:
             Tuple of (success, message)
@@ -613,6 +641,7 @@ class LocalDataService:
             # Reddit URL patterns - also try to extract username
             reddit_patterns = [
                 r'reddit\.com/r/\w+/comments/(\w+)',
+                r'reddit\.com/r/\w+/s/(\w+)',  # share link format
                 r'redd\.it/(\w+)',
                 r'reddit\.com/user/(\w+)/comments/(\w+)',  # user post format
             ]
@@ -655,14 +684,36 @@ class LocalDataService:
             if not post_id or not platform:
                 return False, "Could not parse URL. Please provide a valid X or Reddit post URL."
 
-            # Use extracted handle as ambassador name directly
-            if not ambassador:
-                if extracted_handle:
-                    ambassador = extracted_handle
-                    logger.info(f"Using handle '{extracted_handle}' as ambassador")
-                else:
-                    ambassador = "Unknown"
-                    logger.warning("No handle found in URL - using 'Unknown'")
+            # Check for duplicate before saving
+            if platform == 'x':
+                existing = self.db_service.get_x_post_by_id(post_id)
+            else:
+                existing = self.db_service.get_reddit_post_by_id(post_id)
+
+            if existing:
+                return False, "duplicate"
+
+            # Resolve ambassador identity:
+            # - For X links with an explicit handle, prefer that handle.
+            # - Otherwise use provided ambassador (Discord poster) if available.
+            # - Fall back to extracted Reddit username or Unknown.
+            provided_ambassador = (ambassador or '').strip()
+            if platform == 'x' and extracted_handle:
+                ambassador = extracted_handle
+                logger.info(f"Using X handle '{extracted_handle}' as ambassador")
+            elif provided_ambassador:
+                ambassador = provided_ambassador
+                logger.info(f"Using provided ambassador '{ambassador}'")
+            elif extracted_handle:
+                ambassador = extracted_handle
+                logger.info(f"Using handle '{extracted_handle}' as ambassador")
+            else:
+                ambassador = "Unknown"
+                logger.warning("No handle or submitter found in URL - using 'Unknown'")
+
+            # Persist submitter avatar so Reddit leaderboard can show Discord poster PFP.
+            if provided_ambassador and discord_avatar_url:
+                self.db_service.upsert_ambassador(provided_ambassador, pfp_url=discord_avatar_url)
 
             # Insert into database
             if platform == 'x':
@@ -685,6 +736,10 @@ class LocalDataService:
                     'ambassador': ambassador,
                     'url': content_url,
                     'post_id': post_id,
+                    'submitter_discord_id': submitter_discord_id,
+                    'submitter_username': submitter_username,
+                    'submitter_display_name': provided_ambassador or None,
+                    'submitter_avatar_url': discord_avatar_url,
                     'score': 0,
                     'comments': 0,
                     'views': 0,
@@ -706,7 +761,7 @@ class LocalDataService:
             return False, f"Error adding content: {str(e)}"
 
     def update_reddit_stats(self, year: Optional[int] = None, month: Optional[int] = None) -> Tuple[bool, str]:
-        """Trigger Reddit stats refresh.
+        """Fetch fresh Reddit metrics for all posts in the given month.
 
         Args:
             year: Year to refresh (None for current)
@@ -716,14 +771,216 @@ class LocalDataService:
             Tuple of (success, message)
         """
         try:
-            # For now, just invalidate cache
-            # In a full implementation, this would trigger the Reddit scraper
-            self.clear_cache()
+            from reddit_service import RedditService
 
-            if year and month:
-                return True, f"Cache cleared for {year}/{month}. Stats will refresh on next load."
-            return True, "Cache cleared. Stats will refresh on next load."
+            now = datetime.now()
+            target_year = year or now.year
+            target_month = month or now.month
+            month_name = datetime(target_year, target_month, 1).strftime('%b')
+
+            posts = self.db_service.get_reddit_posts(month=month_name, year=target_year)
+            if not posts:
+                self.clear_cache()
+                return True, "No Reddit posts to refresh."
+
+            service = RedditService()
+            success_count = 0
+            fail_count = 0
+
+            for post in posts:
+                url = post.get('url', '')
+                if not url:
+                    continue
+
+                metrics, msg = service.fetch_post_metrics(url)
+                if metrics:
+                    updated = [{
+                        'ambassador': post['ambassador'],
+                        'url': url,
+                        'post_id': post['post_id'],
+                        'submitter_discord_id': post.get('submitter_discord_id'),
+                        'submitter_username': post.get('submitter_username'),
+                        'submitter_display_name': post.get('submitter_display_name'),
+                        'submitter_avatar_url': post.get('submitter_avatar_url'),
+                        'score': metrics['score'],
+                        'comments': metrics['comments'],
+                        'views': metrics['views'],
+                        'date_posted': metrics.get('date_posted') or post.get('date_posted'),
+                        'submitted_date': post.get('submitted_date'),
+                        'month': month_name,
+                        'year': target_year,
+                    }]
+                    self.db_service.upsert_reddit_posts(updated)
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    logger.warning(f"Reddit fetch failed for {url}: {msg}")
+
+            self.clear_cache()
+            return True, f"Refreshed {success_count} posts ({fail_count} failed)"
 
         except Exception as e:
             logger.error(f"Error updating Reddit stats: {e}", exc_info=True)
             return False, f"Error: {str(e)}"
+
+    def record_daily_snapshot(self) -> Tuple[bool, str]:
+        """Record a daily snapshot of current totals.
+
+        This should be called once per day (e.g., via cron) to track
+        cumulative metrics over time.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            now = datetime.now()
+            date_str = now.strftime('%Y-%m-%d')
+            month_name = now.strftime('%b')
+            year = now.year
+
+            # Get current totals from all posts (current month)
+            x_posts = self.db_service.get_x_posts(month=month_name, year=year)
+            reddit_posts = self.db_service.get_reddit_posts(month=month_name, year=year)
+
+            # Calculate totals
+            x_impressions = sum(safe_int(p.get('impressions')) for p in x_posts)
+            x_likes = sum(safe_int(p.get('likes')) for p in x_posts)
+            x_retweets = sum(safe_int(p.get('retweets')) for p in x_posts)
+            x_replies = sum(safe_int(p.get('replies')) for p in x_posts)
+            x_posts_count = len(x_posts)
+
+            reddit_score = sum(safe_int(p.get('score')) for p in reddit_posts)
+            reddit_comments = sum(safe_int(p.get('comments')) for p in reddit_posts)
+            reddit_views = sum(safe_int(p.get('views')) for p in reddit_posts)
+            reddit_posts_count = len(reddit_posts)
+
+            # Create snapshot record
+            snapshot = {
+                'date': date_str,
+                'x_impressions': x_impressions,
+                'x_likes': x_likes,
+                'x_retweets': x_retweets,
+                'x_replies': x_replies,
+                'x_posts': x_posts_count,
+                'reddit_score': reddit_score,
+                'reddit_comments': reddit_comments,
+                'reddit_views': reddit_views,
+                'reddit_posts': reddit_posts_count,
+                'month': month_name,
+                'year': year
+            }
+
+            self.db_service.upsert_snapshots([snapshot])
+            self.clear_cache()
+
+            logger.info(f"Recorded daily snapshot for {date_str}: X={x_impressions:,} impressions, Reddit={reddit_views:,} views")
+            return True, f"Snapshot recorded for {date_str}"
+
+        except Exception as e:
+            logger.error(f"Error recording daily snapshot: {e}", exc_info=True)
+            return False, f"Error: {str(e)}"
+
+    def get_daily_views(self, year: int, month: int) -> Optional[Dict[str, List]]:
+        """Get daily views (change per day) from cumulative snapshots.
+
+        Calculates the difference between consecutive snapshots to get
+        the actual views gained each day.
+
+        Args:
+            year: Year to query
+            month: Month to query
+
+        Returns:
+            Dictionary with 'dates' and 'daily_views' lists, or None if no data
+        """
+        try:
+            cache_key = f"daily_views_{year}_{month}"
+            cached_result = self._get_cache(cache_key)
+            if cached_result is not None:
+                return cached_result
+
+            month_name = datetime(year, month, 1).strftime('%b')
+            snapshots = self.db_service.get_snapshots(month=month_name, year=year)
+
+            if not snapshots or len(snapshots) < 2:
+                return None
+
+            dates = []
+            daily_views = []
+
+            prev_impressions = 0
+            for i, snapshot in enumerate(snapshots):
+                date_str = snapshot.get('date', '')
+                current_impressions = snapshot.get('x_impressions', 0)
+
+                if date_str:
+                    try:
+                        date_obj = datetime.fromisoformat(date_str)
+                        dates.append(date_obj.strftime('%b %d'))
+                    except Exception:
+                        dates.append(date_str)
+
+                    if i == 0:
+                        # First day - use total as the daily value
+                        daily_views.append(current_impressions)
+                    else:
+                        # Calculate difference from previous day
+                        diff = current_impressions - prev_impressions
+                        daily_views.append(max(0, diff))
+
+                    prev_impressions = current_impressions
+
+            if not dates:
+                return None
+
+            result = {'dates': dates, 'daily_views': daily_views}
+            self._set_cache(cache_key, result)
+            return result
+
+        except Exception as e:
+            logger.error(f"Error getting daily views: {e}", exc_info=True)
+            return None
+
+    def export_daily_snapshots_csv(self, year: int, month: int) -> Optional[str]:
+        """Export daily snapshots to CSV format.
+
+        Args:
+            year: Year to export
+            month: Month to export
+
+        Returns:
+            CSV string or None if no data
+        """
+        try:
+            month_name = datetime(year, month, 1).strftime('%b')
+            snapshots = self.db_service.get_snapshots(month=month_name, year=year)
+
+            if not snapshots:
+                return None
+
+            # Build CSV with daily views calculation
+            lines = ['date,total_x_impressions,daily_x_views,x_likes,x_retweets,x_replies,x_posts']
+
+            prev_impressions = 0
+            for i, snapshot in enumerate(snapshots):
+                date_str = snapshot.get('date', '')
+                x_impressions = snapshot.get('x_impressions', 0)
+                x_likes = snapshot.get('x_likes', 0)
+                x_retweets = snapshot.get('x_retweets', 0)
+                x_replies = snapshot.get('x_replies', 0)
+                x_posts = snapshot.get('x_posts', 0)
+
+                if i == 0:
+                    daily_views = x_impressions
+                else:
+                    daily_views = max(0, x_impressions - prev_impressions)
+
+                prev_impressions = x_impressions
+
+                lines.append(f'{date_str},{x_impressions},{daily_views},{x_likes},{x_retweets},{x_replies},{x_posts}')
+
+            return '\n'.join(lines)
+
+        except Exception as e:
+            logger.error(f"Error exporting daily snapshots CSV: {e}", exc_info=True)
+            return None

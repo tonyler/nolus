@@ -74,6 +74,10 @@ class DatabaseService:
                         ambassador TEXT NOT NULL,
                         url TEXT NOT NULL,
                         post_id TEXT NOT NULL UNIQUE,
+                        submitter_discord_id TEXT,
+                        submitter_username TEXT,
+                        submitter_display_name TEXT,
+                        submitter_avatar_url TEXT,
                         score INTEGER DEFAULT 0,
                         comments INTEGER DEFAULT 0,
                         views INTEGER DEFAULT 0,
@@ -144,6 +148,13 @@ class DatabaseService:
                     )
                 ''')
 
+                # Ensure submitter columns exist for databases created before
+                # reddit submitter attribution was added.
+                self._ensure_column(cursor, 'reddit_posts', 'submitter_discord_id', 'TEXT')
+                self._ensure_column(cursor, 'reddit_posts', 'submitter_username', 'TEXT')
+                self._ensure_column(cursor, 'reddit_posts', 'submitter_display_name', 'TEXT')
+                self._ensure_column(cursor, 'reddit_posts', 'submitter_avatar_url', 'TEXT')
+
                 conn.commit()
                 logger.info("Database schema initialized successfully")
 
@@ -153,6 +164,14 @@ class DatabaseService:
                 raise
             finally:
                 conn.close()
+
+    def _ensure_column(self, cursor: sqlite3.Cursor, table: str, column: str, column_type: str) -> None:
+        """Add a column if it does not already exist."""
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in cursor.fetchall()}
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+            logger.info(f"Added missing column {table}.{column}")
 
     # X Posts Methods
 
@@ -258,10 +277,21 @@ class DatabaseService:
                 for post in posts:
                     cursor.execute('''
                         INSERT INTO reddit_posts (
-                            ambassador, url, post_id, score, comments,
-                            views, date_posted, submitted_date, month, year
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ambassador, url, post_id, submitter_discord_id, submitter_username,
+                            submitter_display_name, submitter_avatar_url,
+                            score, comments, views, date_posted, submitted_date, month, year
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(post_id) DO UPDATE SET
+                            ambassador = CASE
+                                WHEN lower(reddit_posts.ambassador) = 'unknown'
+                                     AND lower(excluded.ambassador) != 'unknown'
+                                THEN excluded.ambassador
+                                ELSE reddit_posts.ambassador
+                            END,
+                            submitter_discord_id = COALESCE(excluded.submitter_discord_id, reddit_posts.submitter_discord_id),
+                            submitter_username = COALESCE(excluded.submitter_username, reddit_posts.submitter_username),
+                            submitter_display_name = COALESCE(excluded.submitter_display_name, reddit_posts.submitter_display_name),
+                            submitter_avatar_url = COALESCE(excluded.submitter_avatar_url, reddit_posts.submitter_avatar_url),
                             score = excluded.score,
                             comments = excluded.comments,
                             views = excluded.views,
@@ -270,6 +300,10 @@ class DatabaseService:
                         post.get('ambassador'),
                         post.get('url'),
                         post.get('post_id'),
+                        post.get('submitter_discord_id'),
+                        post.get('submitter_username'),
+                        post.get('submitter_display_name'),
+                        post.get('submitter_avatar_url'),
                         post.get('score', 0),
                         post.get('comments', 0),
                         post.get('views', 0),
@@ -290,6 +324,28 @@ class DatabaseService:
                 raise
             finally:
                 conn.close()
+
+    def get_x_post_by_id(self, tweet_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single X post by tweet ID."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM x_posts WHERE tweet_id = ?', (tweet_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_reddit_post_by_id(self, post_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single Reddit post by post ID."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM reddit_posts WHERE post_id = ?', (post_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
 
     def get_reddit_posts(self, month: Optional[str] = None, year: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get Reddit posts, optionally filtered by month/year.
